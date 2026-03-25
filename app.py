@@ -7,6 +7,7 @@ import base64
 import io
 import os
 import json
+import zipfile
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -14,7 +15,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "CDF_Template_Base.xlsx")
 SHEET_NAME    = "CDF Template FR to EN"
 
-# Known item dictionary — French → English
 ITEM_DICT = """Jus → Juice
 Paudre chocolat → Cocoa powder
 Pomme de terre → Potato
@@ -42,7 +42,7 @@ Poisson Frais → Fresh fish
 Poulet → Chicken, whole
 Poulet fillet → Chicken, filet
 Poulet village → Local chicken, whole
-Viande de Bœuf → Beef
+Viande de Boeuf → Beef
 Viande de Echevre → Goat
 Viande de Mouton → Lamb
 Viande de Pors → Pork
@@ -67,17 +67,47 @@ def fmt_currency(currency):
     return '#,##0.00" CDF"' if currency == "CDF" else '"$"#,##0.00'
 
 
-def set_cell(ws, addr, value, h_align="center", num_format=None):
+def set_num(ws, addr, value, num_format):
+    """Write a numeric value with centre alignment and number format."""
     cell = ws[addr]
     cell.value = value
+    cell.number_format = num_format
     existing = cell.alignment
     cell.alignment = Alignment(
-        horizontal=h_align,
+        horizontal="center",
         vertical=existing.vertical or "center",
         wrap_text=existing.wrap_text
     )
-    if num_format:
-        cell.number_format = num_format
+
+
+def fill_and_preserve_images(template_path, fill_fn):
+    """Fill template with openpyxl then re-inject images/drawings stripped by openpyxl."""
+    # Grab original image/drawing bytes
+    image_files = {}
+    with zipfile.ZipFile(template_path, 'r') as z:
+        for name in z.namelist():
+            if 'media/' in name or 'drawings/' in name:
+                image_files[name] = z.read(name)
+
+    # Fill
+    wb = openpyxl.load_workbook(template_path)
+    fill_fn(wb)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    # Re-inject
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'r') as zin:
+        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                zout.writestr(item, zin.read(item.filename))
+            for name, data in image_files.items():
+                if name not in zin.namelist():
+                    zout.writestr(name, data)
+
+    out_buf.seek(0)
+    return out_buf.getvalue()
 
 
 @app.route("/health", methods=["GET"])
@@ -165,69 +195,78 @@ def fill_cdf_base():
         location       = data.get("location", "")
         date_submitted = data.get("date_submitted", "")
         speedkey       = data.get("speedkey", "")
+        account_no     = data.get("account_no", "750300")
         currency       = data.get("currency", "CDF")
         items          = data.get("items", [])
         curr_fmt       = fmt_currency(currency)
 
-        wb = openpyxl.load_workbook(TEMPLATE_PATH)
-        ws = wb[SHEET_NAME]
+        def fill(wb):
+            ws = wb[SHEET_NAME]
 
-        # -- Header -----------------------------------------------------------
-        ws["C4"] = requestor
-        ws["I5"] = location
-        ws["L2"] = date_submitted
-        ws["L3"] = date_submitted
-        ws["H6"] = "CDF" if currency == "CDF" else "USD"
-        ws["K6"] = "X" if currency == "CDF" else ""
-        ws["I6"] = "X" if currency == "USD" else ""
+            # Header
+            ws["C4"] = requestor
+            ws["I5"] = location
+            ws["L2"] = date_submitted
+            ws["L3"] = date_submitted
+            ws["H6"] = "CDF" if currency == "CDF" else "USD"
+            ws["K6"] = "X" if currency == "CDF" else ""
+            ws["I6"] = "X" if currency == "USD" else ""
 
-        # -- Line items (rows 22–46, max 25) ----------------------------------
-        grand_total = 0.0
-        for i, item in enumerate(items):
-            if i >= 25:
-                break
-            row        = 22 + i
-            desc_fr    = item.get("description_fr") or ""
-            desc_en    = item.get("description_en") or ""
-            unit       = item.get("unit") or ""
-            qty        = float(item.get("qty") or 0)
-            unit_price = float(item.get("unit_price") or 0)
-            line_total = round(qty * unit_price, 2)
-            grand_total += line_total
+            # Line items (rows 22–46, max 25)
+            # Col A row numbers: A22=1 (hardcoded), A23–A46 are =A22+1 etc — DO NOT overwrite
+            # Col J Est Price: formula =IF(G22="","",G22*H22) — DO NOT overwrite
+            # Col L Actual Price: leave BLANK — DO NOT write anything
+            # J47 Total: formula =SUM($J$22:$K$46) — DO NOT overwrite
+            for i, item in enumerate(items):
+                if i >= 25:
+                    break
+                row        = 22 + i
+                desc_fr    = item.get("description_fr") or ""
+                desc_en    = item.get("description_en") or ""
+                unit       = item.get("unit") or ""
+                qty        = float(item.get("qty") or 0)
+                unit_price = float(item.get("unit_price") or 0)
 
-            ws[f"B{row}"].value     = desc_fr
-            ws[f"B{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                ws[f"B{row}"].value     = desc_fr
+                ws[f"B{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-            ws[f"C{row}"].value     = desc_en
-            ws[f"C{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                ws[f"C{row}"].value     = desc_en
+                ws[f"C{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-            ws[f"D{row}"].value     = unit
-            ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
+                ws[f"D{row}"].value     = unit
+                ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
 
-            set_cell(ws, f"E{row}", speedkey,    "center")
-            set_cell(ws, f"G{row}", qty,         "center", "0")
-            set_cell(ws, f"H{row}", unit_price,  "center", curr_fmt)
+                # Speedkey
+                ws[f"E{row}"].value     = speedkey
+                ws[f"E{row}"].alignment = Alignment(horizontal="center", vertical="center")
 
-        # -- Totals -----------------------------------------------------------
-        grand_total = round(grand_total, 2)
-        ws["L47"]              = grand_total
-        ws["L47"].number_format = curr_fmt
-        ws["L47"].alignment    = Alignment(horizontal="center", vertical="center")
+                # Account number
+                ws[f"F{row}"].value     = account_no
+                ws[f"F{row}"].alignment = Alignment(horizontal="center", vertical="center")
 
-        # -- Submitted by -----------------------------------------------------
-        ws["C70"] = requestor
+                # Qty — number format, centred
+                set_num(ws, f"G{row}", qty, "0")
 
-        # -- Save & return ----------------------------------------------------
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+                # Unit price — currency format, centred
+                set_num(ws, f"H{row}", unit_price, curr_fmt)
+
+                # J (Est Price) has =IF(G22="","",G22*H22) formula — leave it alone
+                # L (Actual Price) — leave blank
+
+            # Apply currency format to J column totals row so it renders correctly
+            ws["J47"].number_format = curr_fmt
+
+            # Submitted by
+            ws["C70"] = requestor
+
+        result = fill_and_preserve_images(TEMPLATE_PATH, fill)
 
         safe_name = requestor.replace(" ", "_") or "Staff"
         date_str  = date_submitted.replace("/", "").replace("-", "") or "nodate"
         filename  = f"CDF_Base_{safe_name}_{date_str}.xlsx"
 
         return send_file(
-            buf,
+            io.BytesIO(result),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True,
             download_name=filename
