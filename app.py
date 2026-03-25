@@ -7,7 +7,6 @@ import base64
 import io
 import os
 import json
-import zipfile
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -81,51 +80,13 @@ def set_num(ws, addr, value, num_format):
 
 
 def safe_fill(template_path, fill_fn):
-    """
-    Fill template with openpyxl, then fix the drawing/image files that openpyxl corrupts.
-    openpyxl rewrites drawing1.xml with stripped namespaces and changes the image
-    relative path to an absolute path — both cause Excel to report errors on open.
-    Fix: after saving, replace the corrupted drawing files with the originals.
-    Also remove calcChain.xml (stale after edits, Excel rebuilds it safely).
-    """
-    # Read ALL original files before openpyxl touches anything
-    original = {}
-    with zipfile.ZipFile(template_path, 'r') as z:
-        for item in z.infolist():
-            original[item.filename] = z.read(item.filename)
-
-    # Files openpyxl corrupts — restore from original verbatim
-    RESTORE_VERBATIM = {
-        'xl/drawings/drawing1.xml',
-        'xl/drawings/_rels/drawing1.xml.rels',
-        'xl/media/image1.jpeg',
-    }
-
+    """Load template, fill it, return bytes. Logo has been removed from template."""
     wb = openpyxl.load_workbook(template_path)
     fill_fn(wb)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-
-    out_buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'r') as zin:
-        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-            written = set()
-            for item in zin.infolist():
-                if item.filename == 'xl/calcChain.xml':
-                    continue  # stale, Excel rebuilds on open
-                if item.filename in RESTORE_VERBATIM and item.filename in original:
-                    zout.writestr(item.filename, original[item.filename])
-                else:
-                    zout.writestr(item, zin.read(item.filename))
-                written.add(item.filename)
-            # Restore anything openpyxl dropped entirely
-            for fname, data in original.items():
-                if fname not in written and fname != 'xl/calcChain.xml':
-                    zout.writestr(fname, data)
-
-    out_buf.seek(0)
-    return out_buf.getvalue()
+    return buf.getvalue()
 
 
 @app.route("/health", methods=["GET"])
