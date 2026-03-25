@@ -80,31 +80,34 @@ def set_num(ws, addr, value, num_format):
     )
 
 
-def fill_and_preserve_images(template_path, fill_fn):
-    """Fill template with openpyxl then re-inject images/drawings stripped by openpyxl."""
-    # Grab original image/drawing bytes
-    image_files = {}
+def safe_fill(template_path, fill_fn):
+    """Fill template with openpyxl, preserve images, remove stale calcChain."""
+    # Read original for any files openpyxl may drop
+    original = {}
     with zipfile.ZipFile(template_path, 'r') as z:
-        for name in z.namelist():
-            if 'media/' in name or 'drawings/' in name:
-                image_files[name] = z.read(name)
+        for item in z.infolist():
+            original[item.filename] = z.read(item.filename)
 
-    # Fill
     wb = openpyxl.load_workbook(template_path)
     fill_fn(wb)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
 
-    # Re-inject
     out_buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'r') as zin:
         with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            written = set(zin.namelist())
             for item in zin.infolist():
+                # Remove stale calcChain — causes Excel errors after cell edits
+                # Excel safely rebuilds it on first open
+                if item.filename == 'xl/calcChain.xml':
+                    continue
                 zout.writestr(item, zin.read(item.filename))
-            for name, data in image_files.items():
-                if name not in zin.namelist():
-                    zout.writestr(name, data)
+            # Restore anything openpyxl dropped (except calcChain)
+            for fname, data in original.items():
+                if fname not in written and fname != 'xl/calcChain.xml':
+                    zout.writestr(fname, data)
 
     out_buf.seek(0)
     return out_buf.getvalue()
@@ -259,7 +262,7 @@ def fill_cdf_base():
             # Submitted by
             ws["C70"] = requestor
 
-        result = fill_and_preserve_images(TEMPLATE_PATH, fill)
+        result = safe_fill(TEMPLATE_PATH, fill)
 
         safe_name = requestor.replace(" ", "_") or "Staff"
         date_str  = date_submitted.replace("/", "").replace("-", "") or "nodate"
