@@ -1,0 +1,242 @@
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
+import openpyxl
+from openpyxl.styles import Alignment
+import anthropic
+import base64
+import io
+import os
+import json
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "CDF_Template_Base.xlsx")
+SHEET_NAME    = "CDF Template FR to EN"
+
+# Known item dictionary — French → English
+ITEM_DICT = """Jus → Juice
+Paudre chocolat → Cocoa powder
+Pomme de terre → Potato
+Quaker oats, 500g → Quaker oats, 500g
+Frommage → Cheese
+Lait Inyange → Milk, Inyange brand
+Yaourt → Yogurt
+Banane plantain → Banana plantains
+Fruits mixte → Fruits
+Beure d'arachide → Peanut Butter
+Chocolate Crème → Chocolate cream
+Condiment → Condiments, assorted
+Levire → Yeast
+Miel, American Green, 1kg → Honey, American Green, 1kg
+Ndizi, viazi, mambo → Potato, banana, yam
+Ovaltine → Ovaltine
+Sucre → Sugar
+Manioc → Cassava
+Blando de poulet → Chicken Breast
+Oeuf Local, 10ct → Local eggs, 10 count
+Oeufs, 30ct → Eggs, 30 count
+Poisson filet → Fish fillet
+poisson fimee → Smoked fish
+Poisson Frais → Fresh fish
+Poulet → Chicken, whole
+Poulet fillet → Chicken, filet
+Poulet village → Local chicken, whole
+Viande de Bœuf → Beef
+Viande de Echevre → Goat
+Viande de Mouton → Lamb
+Viande de Pors → Pork
+Viande Hache → Ground meat
+Champignon → Mushroom
+Legume mixte → Vegetables
+Lentil → Lentils
+Tomatte Frais → Fresh tomato"""
+
+
+def get_client():
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set")
+    try:
+        return anthropic.Anthropic(api_key=api_key)
+    except Exception as e:
+        raise ValueError(f"Failed to initialise Anthropic client: {str(e)}")
+
+
+def fmt_currency(currency):
+    return '#,##0.00" CDF"' if currency == "CDF" else '"$"#,##0.00'
+
+
+def set_cell(ws, addr, value, h_align="center", num_format=None):
+    cell = ws[addr]
+    cell.value = value
+    existing = cell.alignment
+    cell.alignment = Alignment(
+        horizontal=h_align,
+        vertical=existing.vertical or "center",
+        wrap_text=existing.wrap_text
+    )
+    if num_format:
+        cell.number_format = num_format
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "api_key_set": bool(os.environ.get("ANTHROPIC_API_KEY"))})
+
+
+# -- Scan handwritten request sheet ------------------------------------------
+@app.route("/scan-request", methods=["POST", "OPTIONS"])
+def scan_request():
+    if request.method == "OPTIONS":
+        return "", 204
+
+    try:
+        client = get_client()
+
+        if "image" not in request.files:
+            return jsonify({"error": "No image uploaded"}), 400
+
+        file       = request.files["image"]
+        image_data = file.read()
+        if not image_data:
+            return jsonify({"error": "Image is empty"}), 400
+
+        media_type = file.content_type or "image/jpeg"
+        if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+            media_type = "image/jpeg"
+
+        b64 = base64.standard_b64encode(image_data).decode("utf-8")
+
+        prompt = f"""You are reading a handwritten purchase request sheet written in French for an NGO in the DRC.
+
+Extract every line item visible on the sheet. For each item return:
+- description_fr: the item description exactly as written in French
+- description_en: the English translation (use the dictionary below if the item matches, otherwise translate accurately)
+- unit: unit of measure (e.g. kg, pcs, litre, sachet, boite) — copy exactly as written
+- qty: quantity as a number
+- unit_price: unit price as a number (digits only, no currency symbols or commas)
+
+KNOWN ITEM DICTIONARY (French → English):
+{ITEM_DICT}
+
+For items not in the dictionary, provide an accurate English translation.
+If a value is illegible, use null for that field.
+Return ONLY a valid JSON array, no markdown, no explanation.
+Example: [{{"description_fr":"Sucre","description_en":"Sugar","unit":"kg","qty":5,"unit_price":3000}}]"""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        )
+
+        text  = "".join(b.text for b in message.content if hasattr(b, "text"))
+        clean = text.replace("```json", "").replace("```", "").strip()
+        items = json.loads(clean)
+        return jsonify({"items": items})
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 503
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Could not parse AI response: {str(e)}"}), 422
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# -- Fill CDF template --------------------------------------------------------
+@app.route("/fill-cdf-base", methods=["POST", "OPTIONS"])
+def fill_cdf_base():
+    if request.method == "OPTIONS":
+        return "", 204
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data received"}), 400
+
+        requestor      = data.get("requestor", "")
+        location       = data.get("location", "")
+        date_submitted = data.get("date_submitted", "")
+        speedkey       = data.get("speedkey", "")
+        currency       = data.get("currency", "CDF")
+        items          = data.get("items", [])
+        curr_fmt       = fmt_currency(currency)
+
+        wb = openpyxl.load_workbook(TEMPLATE_PATH)
+        ws = wb[SHEET_NAME]
+
+        # -- Header -----------------------------------------------------------
+        ws["C4"] = requestor
+        ws["I5"] = location
+        ws["L2"] = date_submitted
+        ws["L3"] = date_submitted
+        ws["H6"] = "CDF" if currency == "CDF" else "USD"
+        ws["K6"] = "X" if currency == "CDF" else ""
+        ws["I6"] = "X" if currency == "USD" else ""
+
+        # -- Line items (rows 22–46, max 25) ----------------------------------
+        grand_total = 0.0
+        for i, item in enumerate(items):
+            if i >= 25:
+                break
+            row        = 22 + i
+            desc_fr    = item.get("description_fr") or ""
+            desc_en    = item.get("description_en") or ""
+            unit       = item.get("unit") or ""
+            qty        = float(item.get("qty") or 0)
+            unit_price = float(item.get("unit_price") or 0)
+            line_total = round(qty * unit_price, 2)
+            grand_total += line_total
+
+            ws[f"B{row}"].value     = desc_fr
+            ws[f"B{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+            ws[f"C{row}"].value     = desc_en
+            ws[f"C{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+            ws[f"D{row}"].value     = unit
+            ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
+
+            set_cell(ws, f"E{row}", speedkey,    "center")
+            set_cell(ws, f"G{row}", qty,         "center", "0")
+            set_cell(ws, f"H{row}", unit_price,  "center", curr_fmt)
+
+        # -- Totals -----------------------------------------------------------
+        grand_total = round(grand_total, 2)
+        ws["L47"]              = grand_total
+        ws["L47"].number_format = curr_fmt
+        ws["L47"].alignment    = Alignment(horizontal="center", vertical="center")
+
+        # -- Submitted by -----------------------------------------------------
+        ws["C70"] = requestor
+
+        # -- Save & return ----------------------------------------------------
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        safe_name = requestor.replace(" ", "_") or "Staff"
+        date_str  = date_submitted.replace("/", "").replace("-", "") or "nodate"
+        filename  = f"CDF_Base_{safe_name}_{date_str}.xlsx"
+
+        return send_file(
+            buf,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=filename
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
