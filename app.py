@@ -81,12 +81,25 @@ def set_num(ws, addr, value, num_format):
 
 
 def safe_fill(template_path, fill_fn):
-    """Fill template with openpyxl, preserve images, remove stale calcChain."""
-    # Read original for any files openpyxl may drop
+    """
+    Fill template with openpyxl, then fix the drawing/image files that openpyxl corrupts.
+    openpyxl rewrites drawing1.xml with stripped namespaces and changes the image
+    relative path to an absolute path — both cause Excel to report errors on open.
+    Fix: after saving, replace the corrupted drawing files with the originals.
+    Also remove calcChain.xml (stale after edits, Excel rebuilds it safely).
+    """
+    # Read ALL original files before openpyxl touches anything
     original = {}
     with zipfile.ZipFile(template_path, 'r') as z:
         for item in z.infolist():
             original[item.filename] = z.read(item.filename)
+
+    # Files openpyxl corrupts — restore from original verbatim
+    RESTORE_VERBATIM = {
+        'xl/drawings/drawing1.xml',
+        'xl/drawings/_rels/drawing1.xml.rels',
+        'xl/media/image1.jpeg',
+    }
 
     wb = openpyxl.load_workbook(template_path)
     fill_fn(wb)
@@ -97,14 +110,16 @@ def safe_fill(template_path, fill_fn):
     out_buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'r') as zin:
         with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-            written = set(zin.namelist())
+            written = set()
             for item in zin.infolist():
-                # Remove stale calcChain — causes Excel errors after cell edits
-                # Excel safely rebuilds it on first open
                 if item.filename == 'xl/calcChain.xml':
-                    continue
-                zout.writestr(item, zin.read(item.filename))
-            # Restore anything openpyxl dropped (except calcChain)
+                    continue  # stale, Excel rebuilds on open
+                if item.filename in RESTORE_VERBATIM and item.filename in original:
+                    zout.writestr(item.filename, original[item.filename])
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+                written.add(item.filename)
+            # Restore anything openpyxl dropped entirely
             for fname, data in original.items():
                 if fname not in written and fname != 'xl/calcChain.xml':
                     zout.writestr(fname, data)
