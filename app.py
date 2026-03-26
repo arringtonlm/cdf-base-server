@@ -117,22 +117,34 @@ def scan_request():
 
         b64 = base64.standard_b64encode(image_data).decode("utf-8")
 
-        prompt = f"""You are reading a handwritten purchase request sheet written in French for an NGO in the DRC.
+        prompt = f"""You are reading a handwritten purchase request sheet written in French for an NGO in the Democratic Republic of Congo.
 
 Extract every line item visible on the sheet. For each item return:
 - description_fr: the item description exactly as written in French
 - description_en: the English translation (use the dictionary below if the item matches, otherwise translate accurately)
-- unit: unit of measure (e.g. kg, pcs, litre, sachet, boite) — copy exactly as written
+- unit: unit of measure (e.g. kg, pcs, litre, sachet, boite, divers, régime, bassin) — copy exactly as written
 - qty: quantity as a number
-- unit_price: unit price as a number (digits only, no currency symbols or commas)
+- unit_price: unit price as a number (whole number only — no currency symbols, no commas, no "fc" suffix)
+
+CRITICAL RULES FOR READING UNIT PRICES:
+All prices are in Congolese Francs (CDF). Key facts about how they are written:
+
+1. PRICES END IN "fc" — prices are written as "22,000fc" or "22.000fc". Strip the "fc" suffix and read only the number before it.
+2. COMMAS ARE THOUSAND SEPARATORS — "22,000" means twenty-two thousand (22000). Never return 22 or 220 or 2200 for this.
+3. ALL PRICES ARE WHOLE NUMBERS — there are no decimal points. If you see what looks like a decimal, it is a thousand separator.
+4. EXPECTED RANGE — unit prices will almost always be between 1,000 and 200,000 CDF. If you read a price outside this range, re-examine it.
+5. PRICES TYPICALLY END IN 000 — most prices are round thousands: 5,000 / 15,000 / 22,000 / 50,000 / 96,000. If you read a price that does not end in 000, double-check it.
+6. DIGIT CONFUSION — watch carefully for these pairs which are frequently confused in this handwriting style: 0 vs 6, 1 vs 7, 3 vs 8, 9 vs 4, 5 vs 6, 2 vs 9. When two readings are plausible, prefer the one that gives a rounder, more common CDF price (e.g. 50,000 is more common than 60,000; 26,000 is more common than 96,000).
+7. ROW DATES — some rows contain only a date (e.g. "Vendredi 27.03.2026"). These are section headers, not line items. Skip them entirely.
+8. TOTAL ROW — ignore the "Total" row at the bottom.
 
 KNOWN ITEM DICTIONARY (French → English):
 {ITEM_DICT}
 
 For items not in the dictionary, provide an accurate English translation.
-If a value is illegible, use null for that field.
+If a value is truly illegible after careful examination, use null for that field.
 Return ONLY a valid JSON array, no markdown, no explanation.
-Example: [{{"description_fr":"Sucre","description_en":"Sugar","unit":"kg","qty":5,"unit_price":3000}}]"""
+Example: [{{"description_fr":"Viande de boeuf","description_en":"Beef","unit":"kg","qty":12,"unit_price":22000}}]"""
 
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
