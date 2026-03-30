@@ -127,9 +127,6 @@ Extract every line item visible on the sheet. For each item return:
 - unit_price: unit price as a number (whole number only — no currency symbols, no commas, no "fc" suffix)
 - cout_total: the line total as written in the "Coût Total" column (whole number, strip "fc" and commas — same rules as unit_price)
 
-Also return one additional object at the END of the array for the grand total row:
-{{"is_grand_total": true, "grand_total": <number as written in the Total row at the bottom, strip "fc" and commas>}}
-
 CRITICAL RULES FOR READING UNIT PRICES AND TOTALS:
 All prices are in Congolese Francs (CDF). Key facts about how they are written:
 
@@ -140,7 +137,7 @@ All prices are in Congolese Francs (CDF). Key facts about how they are written:
 5. PRICES TYPICALLY END IN 000 — most prices are round thousands: 5,000 / 15,000 / 22,000 / 50,000 / 96,000. If you read a price that does not end in 000, double-check it.
 6. DIGIT CONFUSION — watch carefully for these pairs which are frequently confused in this handwriting style: 0 vs 6, 1 vs 7, 3 vs 8, 9 vs 4, 5 vs 6, 2 vs 9. When two readings are plausible, prefer the one that gives a rounder, more common CDF price (e.g. 50,000 is more common than 60,000; 26,000 is more common than 96,000).
 7. ROW DATES — some rows contain only a date (e.g. "Vendredi 27.03.2026"). These are section headers, not line items. Skip them entirely.
-8. TOTAL ROW — read the grand total value at the bottom and return it as the final object with is_grand_total:true.
+8. TOTAL ROW — ignore the "Total" row at the bottom entirely.
 
 KNOWN ITEM DICTIONARY (French → English):
 {ITEM_DICT}
@@ -148,7 +145,7 @@ KNOWN ITEM DICTIONARY (French → English):
 For items not in the dictionary, provide an accurate English translation.
 If a value is truly illegible after careful examination, use null for that field.
 Return ONLY a valid JSON array, no markdown, no explanation.
-Example: [{{"description_fr":"Viande de boeuf","description_en":"Beef","unit":"kg","qty":12,"unit_price":22000,"cout_total":264000}},{{"is_grand_total":true,"grand_total":1938000}}]"""
+Example: [{{"description_fr":"Viande de boeuf","description_en":"Beef","unit":"kg","qty":12,"unit_price":22000,"cout_total":264000}}]"""
 
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -166,12 +163,8 @@ Example: [{{"description_fr":"Viande de boeuf","description_en":"Beef","unit":"k
         clean = text.replace("```json", "").replace("```", "").strip()
         raw   = json.loads(clean)
 
-        # Separate line items from the grand total object
-        items       = [r for r in raw if not r.get("is_grand_total")]
-        grand_total_obj = next((r for r in raw if r.get("is_grand_total")), None)
-        grand_total = grand_total_obj.get("grand_total") if grand_total_obj else None
-
-        return jsonify({"items": items, "grand_total": grand_total})
+        items = [r for r in raw if not r.get("is_grand_total")]  # safety filter
+        return jsonify({"items": items})
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 503
