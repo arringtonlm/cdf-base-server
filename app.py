@@ -147,17 +147,39 @@ If a value is truly illegible after careful examination, use null for that field
 Return ONLY a valid JSON array, no markdown, no explanation.
 Example: [{{"description_fr":"Viande de boeuf","description_en":"Beef","unit":"kg","qty":12,"unit_price":22000,"cout_total":264000}}]"""
 
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                    {"type": "text", "text": prompt}
-                ]
-            }]
-        )
+        # Model fallback chain — if one is deprecated, the next is tried automatically
+        MODELS = [
+            "claude-haiku-4-5",    # fast, cheap, great for OCR — primary choice
+            "claude-sonnet-4-5",   # fallback
+            "claude-sonnet-4-6",   # fallback
+        ]
+        message = None
+        last_error = None
+        for model_id in MODELS:
+            try:
+                message = client.messages.create(
+                    model=model_id,
+                    max_tokens=2000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                            {"type": "text", "text": prompt}
+                        ]
+                    }]
+                )
+                break  # success — stop trying
+            except anthropic.NotFoundError:
+                last_error = f"Model {model_id} not found"
+                continue  # try next model
+            except anthropic.APIStatusError as e:
+                if e.status_code in (404, 400) and "model" in str(e.message).lower():
+                    last_error = f"Model {model_id} unavailable: {e.message}"
+                    continue  # try next model
+                raise  # other API errors — raise immediately
+
+        if message is None:
+            raise ValueError(f"All models unavailable. Last error: {last_error}")
 
         text  = "".join(b.text for b in message.content if hasattr(b, "text"))
         clean = text.replace("```json", "").replace("```", "").strip()
@@ -167,11 +189,15 @@ Example: [{{"description_fr":"Viande de boeuf","description_en":"Beef","unit":"k
         return jsonify({"items": items})
 
     except ValueError as e:
-        return jsonify({"error": str(e)}), 503
+        return jsonify({"error": f"Configuration error: {str(e)}"}), 503
     except json.JSONDecodeError as e:
-        return jsonify({"error": f"Could not parse AI response: {str(e)}"}), 422
+        return jsonify({"error": f"AI returned unexpected format: {str(e)}. Raw: {text[:200] if 'text' in dir() else 'N/A'}"}), 422
+    except anthropic.APIStatusError as e:
+        return jsonify({"error": f"Anthropic API error {e.status_code}: {e.message}"}), 502
+    except anthropic.APIConnectionError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {str(e)}"}), 502
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
 
 
 # -- Fill CDF template --------------------------------------------------------
