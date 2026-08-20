@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "CDF_Template_Base.xlsx")
-SHEET_NAME    = "CDF Template FR to EN"
+SHEET_NAME    = "Cash Disbursement"
 
 ITEM_DICT = """Jus → Juice
 Paudre chocolat → Cocoa powder
@@ -236,11 +236,10 @@ def fill_cdf_base():
             # Col A row numbers: A22=1 (hardcoded), A23–A46 are =A22+1 etc — DO NOT overwrite
             # Col J Est Price: formula =IF(G22="","",G22*H22) — DO NOT overwrite
             # Col L Actual Price: leave BLANK — DO NOT write anything
-            # J47 Total: formula =SUM($J$22:$K$46) — DO NOT overwrite
             for i, item in enumerate(items):
-                if i >= 25:
+                if i >= 21:
                     break
-                row        = 22 + i
+                row        = 21 + i
                 desc_fr    = item.get("description_fr") or ""
                 desc_en    = item.get("description_en") or ""
                 unit       = item.get("unit") or ""
@@ -270,14 +269,14 @@ def fill_cdf_base():
                 # Unit price — currency format, centred
                 set_num(ws, f"H{row}", unit_price, curr_fmt)
 
-                # J (Est Price) has =IF(G22="","",G22*H22) formula — leave it alone
-                # L (Actual Price) — leave blank
+            # Grand total
+            ws["L42"]              = grand_total
+            ws["L42"].number_format = curr_fmt
+            ws["L42"].alignment    = Alignment(horizontal="center", vertical="center")
 
-            # Apply currency format to J column totals row so it renders correctly
-            ws["J47"].number_format = curr_fmt
-
-            # Submitted by
-            ws["C70"] = requestor
+            # Submitted by / Clearance
+            ws["A48"] = requestor  # merged A48:C49
+            ws["C65"] = requestor  # merged C65:D66
 
         result = safe_fill(TEMPLATE_PATH, fill)
 
