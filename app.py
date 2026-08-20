@@ -228,23 +228,22 @@ def fill_cdf_base():
             ws["I5"] = location
             ws["L2"] = date_submitted
             ws["L3"] = date_submitted
-            ws["H6"] = "CDF" if currency == "CDF" else "USD"
-            ws["K6"] = "X" if currency == "CDF" else ""
-            ws["I6"] = "X" if currency == "USD" else ""
+            ws["H6"] = "USD"   # static label — always USD
+            ws["J6"] = "CDF"   # static label — always CDF
+            ws["I6"] = "X" if currency == "USD" else ""   # X box for USD
+            ws["K6"] = "X" if currency == "CDF" else ""   # X box for CDF
 
-            # Line items (rows 22–46, max 25)
-            # Col A row numbers: A22=1 (hardcoded), A23–A46 are =A22+1 etc — DO NOT overwrite
-            # Col J Est Price: formula =IF(G22="","",G22*H22) — DO NOT overwrite
-            # Col L Actual Price: leave BLANK — DO NOT write anything
+            # Line items (rows 21–41, max 21)
+            grand_total = 0.0
             for i, item in enumerate(items):
                 if i >= 21:
                     break
                 row        = 21 + i
                 desc_fr    = item.get("description_fr") or ""
                 desc_en    = item.get("description_en") or ""
-                unit       = item.get("unit") or ""
                 qty        = float(item.get("qty") or 0)
                 unit_price = float(item.get("unit_price") or 0)
+                grand_total += round(qty * unit_price, 2)
 
                 ws[f"B{row}"].value     = desc_fr
                 ws[f"B{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
@@ -252,10 +251,7 @@ def fill_cdf_base():
                 ws[f"C{row}"].value     = desc_en
                 ws[f"C{row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-                ws[f"D{row}"].value     = unit
-                ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
-
-                # Speedkey — merged into D in this template
+                # Speedkey — D column (E is merged into D in this template)
                 ws[f"D{row}"].value     = speedkey
                 ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
 
@@ -268,6 +264,8 @@ def fill_cdf_base():
 
                 # Unit price — currency format, centred
                 set_num(ws, f"H{row}", unit_price, curr_fmt)
+
+            grand_total = round(grand_total, 2)
 
             # Grand total
             ws["L42"]              = grand_total
