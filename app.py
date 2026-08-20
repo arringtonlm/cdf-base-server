@@ -255,9 +255,9 @@ def fill_cdf_base():
                 ws[f"D{row}"].value     = unit
                 ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
 
-                # Speedkey
-                ws[f"E{row}"].value     = speedkey
-                ws[f"E{row}"].alignment = Alignment(horizontal="center", vertical="center")
+                # Speedkey — merged into D in this template
+                ws[f"D{row}"].value     = speedkey
+                ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center")
 
                 # Account number
                 ws[f"F{row}"].value     = account_no
